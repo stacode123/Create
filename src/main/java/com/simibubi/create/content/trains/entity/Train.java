@@ -150,6 +150,9 @@ public class Train {
 	int ticksSinceLastMailTransfer;
 	double[] stress;
 
+
+	private CollisionCache collisionCache;
+
 	// advancements
 	public Player backwardsDriver;
 
@@ -433,6 +436,7 @@ public class Train {
 
 			if (index == 0) {
 				distance = actualDistance;
+				updateCollisionCache();
 				collideWithOtherTrains(level, carriage);
 				backwardsDriver = null;
 				if (graph == null)
@@ -620,6 +624,62 @@ public class Train {
 		return false;
 	}
 
+
+	private void updateCollisionCache() {
+		if (derailed || graph == null) {
+			if (collisionCache != null)
+				collisionCache.invalidate();
+			return;
+		}
+
+		int totalSegments = carriages.size() * 2 - 1;
+
+		if (collisionCache == null || collisionCache.start.length < totalSegments) {
+			collisionCache = new CollisionCache(totalSegments);
+		}
+
+		Vec3 lastPoint = null;
+		int segmentIndex = 0;
+		ResourceKey<Level> trainDimension = null;
+
+		for (Carriage carriage : carriages) {
+			TravellingPoint leading = carriage.getLeadingPoint();
+			TravellingPoint trailing = carriage.getTrailingPoint();
+
+			if (leading.edge == null || trailing.edge == null ||
+				leading.node1 == null || trailing.node1 == null)
+				continue;
+
+			ResourceKey<Level> leadingDim = leading.node1.getLocation().dimension;
+			ResourceKey<Level> trailingDim = trailing.node1.getLocation().dimension;
+
+			if (!leadingDim.equals(trailingDim))
+				continue;
+
+			if (trainDimension == null)
+				trainDimension = leadingDim;
+			else if (!trainDimension.equals(leadingDim))
+				continue;
+
+			Vec3 start = leading.getPosition(graph);
+			Vec3 end = trailing.getPosition(graph);
+
+			if (lastPoint != null && segmentIndex < totalSegments) {
+				collisionCache.addSegment(lastPoint, start, segmentIndex++);
+			}
+
+			if (segmentIndex < totalSegments) {
+				collisionCache.addSegment(start, end, segmentIndex++);
+			}
+
+			lastPoint = end;
+		}
+
+		collisionCache.segmentCount = segmentIndex;
+		collisionCache.dimension = trainDimension;
+		collisionCache.valid = segmentIndex > 0 && trainDimension != null;
+	}
+
 	private void collideWithOtherTrains(Level level, Carriage carriage) {
 		if (derailed)
 			return;
@@ -654,6 +714,12 @@ public class Train {
 
 	public Pair<Train, Vec3> findCollidingTrain(Level level, Vec3 start, Vec3 end, ResourceKey<Level> dimension) {
 		Vec3 diff = end.subtract(start);
+		double length = diff.length();
+
+		if (length < 0.0001)
+			return null;
+
+		Vec3 normedDiff = diff.normalize();
 		double maxDistanceSqr = Math.pow(AllConfigs.server().trains.maxAssemblyLength.get(), 2.0);
 
 		Trains: for (Train train : Create.RAILWAYS.sided(level).trains.values()) {
@@ -662,67 +728,120 @@ public class Train {
 			if (train.graph != null && train.graph != graph)
 				continue;
 
-			Vec3 lastPoint = null;
+			// Compute cache for trains that don't have it yet
+			if (train.collisionCache == null || !train.collisionCache.isValid()) {
+				train.updateCollisionCache();
+			}
 
-			for (Carriage otherCarriage : train.carriages) {
-				for (boolean betweenBits : Iterate.trueAndFalse) {
-					if (betweenBits && lastPoint == null)
-						continue;
+			// Use cached data if available, otherwise fall back to old method
+			if (train.collisionCache != null && train.collisionCache.isValid()) {
+				if (!train.collisionCache.dimension.equals(dimension))
+					continue;
 
-					TravellingPoint otherLeading = otherCarriage.getLeadingPoint();
-					TravellingPoint otherTrailing = otherCarriage.getTrailingPoint();
-					if (otherLeading.edge == null || otherTrailing.edge == null)
-						continue;
-					ResourceKey<Level> otherDimension = otherLeading.node1.getLocation().dimension;
-					if (!otherDimension.equals(otherTrailing.node1.getLocation().dimension))
-						continue;
-					if (!otherDimension.equals(dimension))
-						continue;
+				// Fast path: iterate through precomputed cache
+				CollisionCache cache = train.collisionCache;
+				for (int i = 0; i < cache.segmentCount; i++) {
+					Vec3 start2 = cache.start[i];
+					Vec3 end2 = cache.end[i];
 
-					Vec3 start2 = otherLeading.getPosition(train.graph);
-					Vec3 end2 = otherTrailing.getPosition(train.graph);
-
+					// Early distance culling using cached positions
 					if (Math.min(start2.distanceToSqr(start), end2.distanceToSqr(start)) > maxDistanceSqr)
 						continue Trains;
 
-					if (betweenBits) {
-						end2 = start2;
-						start2 = lastPoint;
-					}
-
-					lastPoint = end2;
-
+					// Vertical separation check
 					if ((end.y < end2.y - 3 || end2.y < end.y - 3)
-						&& (start.y < start2.y - 3 || start2.y < start.y - 3))
+					    && (start.y < start2.y - 3 || start2.y < start.y - 3))
 						continue;
 
-					Vec3 diff2 = end2.subtract(start2);
-					Vec3 normedDiff = diff.normalize();
-					Vec3 normedDiff2 = diff2.normalize();
+					// Use precomputed direction vectors from cache
+					Vec3 normedDiff2 = cache.direction[i];
 					double[] intersect = VecHelper.intersect(start, start2, normedDiff, normedDiff2, Axis.Y);
 
 					if (intersect == null) {
+						// Sphere intersection fallback
 						Vec3 intersectSphere = VecHelper.intersectSphere(start2, normedDiff2, start, .125f);
 						if (intersectSphere == null)
 							continue;
-						if (!Mth.equal(normedDiff2.dot(intersectSphere.subtract(start2)
-							.normalize()), 1))
+
+						if (!Mth.equal(normedDiff2.dot(intersectSphere.subtract(start2).normalize()), 1))
 							continue;
+
 						intersect = new double[2];
 						intersect[0] = intersectSphere.distanceTo(start) - .125;
 						intersect[1] = intersectSphere.distanceTo(start2) - .125;
 					}
 
-					if (intersect[0] > diff.length())
+					// Bounds checking using cached lengths
+					if (intersect[0] > length || intersect[0] < 0)
 						continue;
-					if (intersect[1] > diff2.length())
-						continue;
-					if (intersect[0] < 0)
-						continue;
-					if (intersect[1] < 0)
+					if (intersect[1] > cache.segmentLength[i] || intersect[1] < 0)
 						continue;
 
 					return Pair.of(train, start.add(normedDiff.scale(intersect[0])));
+				}
+			} else {
+				// Fallback: original algorithm for trains without valid cache
+				Vec3 lastPoint = null;
+
+				for (Carriage otherCarriage : train.carriages) {
+					for (boolean betweenBits : Iterate.trueAndFalse) {
+						if (betweenBits && lastPoint == null)
+							continue;
+
+						TravellingPoint otherLeading = otherCarriage.getLeadingPoint();
+						TravellingPoint otherTrailing = otherCarriage.getTrailingPoint();
+						if (otherLeading.edge == null || otherTrailing.edge == null)
+							continue;
+						ResourceKey<Level> otherDimension = otherLeading.node1.getLocation().dimension;
+						if (!otherDimension.equals(otherTrailing.node1.getLocation().dimension))
+							continue;
+						if (!otherDimension.equals(dimension))
+							continue;
+
+						Vec3 start2 = otherLeading.getPosition(train.graph);
+						Vec3 end2 = otherTrailing.getPosition(train.graph);
+
+						if (Math.min(start2.distanceToSqr(start), end2.distanceToSqr(start)) > maxDistanceSqr)
+							continue Trains;
+
+						if (betweenBits) {
+							end2 = start2;
+							start2 = lastPoint;
+						}
+
+						lastPoint = end2;
+
+						if ((end.y < end2.y - 3 || end2.y < end.y - 3)
+							&& (start.y < start2.y - 3 || start2.y < start.y - 3))
+							continue;
+
+						Vec3 diff2 = end2.subtract(start2);
+						Vec3 normedDiff2 = diff2.normalize();
+						double[] intersect = VecHelper.intersect(start, start2, normedDiff, normedDiff2, Axis.Y);
+
+						if (intersect == null) {
+							Vec3 intersectSphere = VecHelper.intersectSphere(start2, normedDiff2, start, .125f);
+							if (intersectSphere == null)
+								continue;
+							if (!Mth.equal(normedDiff2.dot(intersectSphere.subtract(start2)
+								.normalize()), 1))
+								continue;
+							intersect = new double[2];
+							intersect[0] = intersectSphere.distanceTo(start) - .125;
+							intersect[1] = intersectSphere.distanceTo(start2) - .125;
+						}
+
+						if (intersect[0] > length)
+							continue;
+						if (intersect[1] > diff2.length())
+							continue;
+						if (intersect[0] < 0)
+							continue;
+						if (intersect[1] < 0)
+							continue;
+
+						return Pair.of(train, start.add(normedDiff.scale(intersect[0])));
+					}
 				}
 			}
 		}
@@ -1088,6 +1207,66 @@ public class Train {
 			carriages.get(carriages.size() - 1)
 				.getTrailingPoint())
 			.map(tp -> Couple.create(tp.node1, tp.node2));
+	}
+
+
+	/**
+	 * Collision detection cache structure.
+	 * Stores precomputed train segment positions to avoid repeated graph lookups.
+	 */
+	private static class CollisionCache {
+		int segmentCount;
+
+		// Position arrays - precomputed to avoid repeated graph lookups
+		Vec3[] start;
+		Vec3[] end;
+
+		// Direction vectors (normalized) - precomputed for intersection tests
+		Vec3[] direction;
+		double[] segmentLength;
+
+		// Metadata
+		ResourceKey<Level> dimension;
+		boolean valid;
+
+		CollisionCache(int maxSegments) {
+			this.segmentCount = 0;
+			this.start = new Vec3[maxSegments];
+			this.end = new Vec3[maxSegments];
+			this.direction = new Vec3[maxSegments];
+			this.segmentLength = new double[maxSegments];
+			this.valid = false;
+		}
+
+		void invalidate() {
+			this.valid = false;
+		}
+
+		boolean isValid() {
+			return valid && segmentCount > 0;
+		}
+
+		/**
+		 * Add a segment to the cache with precomputed direction and length
+		 */
+		void addSegment(Vec3 startPos, Vec3 endPos, int index) {
+			if (index >= start.length)
+				return;
+
+			start[index] = startPos;
+			end[index] = endPos;
+
+			// Precompute direction vector and length
+			Vec3 diff = endPos.subtract(startPos);
+			double length = diff.length();
+
+			segmentLength[index] = length;
+			if (length > 0.0001) {
+				direction[index] = diff.normalize();
+			} else {
+				direction[index] = Vec3.ZERO;
+			}
+		}
 	}
 
 	public static class Penalties {
