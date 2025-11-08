@@ -779,71 +779,8 @@ public class Train {
 
 					return Pair.of(train, start.add(normedDiff.scale(intersect[0])));
 				}
-			} else {
-				// Fallback: original algorithm for trains without valid cache
-				Vec3 lastPoint = null;
-
-				for (Carriage otherCarriage : train.carriages) {
-					for (boolean betweenBits : Iterate.trueAndFalse) {
-						if (betweenBits && lastPoint == null)
-							continue;
-
-						TravellingPoint otherLeading = otherCarriage.getLeadingPoint();
-						TravellingPoint otherTrailing = otherCarriage.getTrailingPoint();
-						if (otherLeading.edge == null || otherTrailing.edge == null)
-							continue;
-						ResourceKey<Level> otherDimension = otherLeading.node1.getLocation().dimension;
-						if (!otherDimension.equals(otherTrailing.node1.getLocation().dimension))
-							continue;
-						if (!otherDimension.equals(dimension))
-							continue;
-
-						Vec3 start2 = otherLeading.getPosition(train.graph);
-						Vec3 end2 = otherTrailing.getPosition(train.graph);
-
-						if (Math.min(start2.distanceToSqr(start), end2.distanceToSqr(start)) > maxDistanceSqr)
-							continue Trains;
-
-						if (betweenBits) {
-							end2 = start2;
-							start2 = lastPoint;
-						}
-
-						lastPoint = end2;
-
-						if ((end.y < end2.y - 3 || end2.y < end.y - 3)
-							&& (start.y < start2.y - 3 || start2.y < start.y - 3))
-							continue;
-
-						Vec3 diff2 = end2.subtract(start2);
-						Vec3 normedDiff2 = diff2.normalize();
-						double[] intersect = VecHelper.intersect(start, start2, normedDiff, normedDiff2, Axis.Y);
-
-						if (intersect == null) {
-							Vec3 intersectSphere = VecHelper.intersectSphere(start2, normedDiff2, start, .125f);
-							if (intersectSphere == null)
-								continue;
-							if (!Mth.equal(normedDiff2.dot(intersectSphere.subtract(start2)
-								.normalize()), 1))
-								continue;
-							intersect = new double[2];
-							intersect[0] = intersectSphere.distanceTo(start) - .125;
-							intersect[1] = intersectSphere.distanceTo(start2) - .125;
-						}
-
-						if (intersect[0] > length)
-							continue;
-						if (intersect[1] > diff2.length())
-							continue;
-						if (intersect[0] < 0)
-							continue;
-						if (intersect[1] < 0)
-							continue;
-
-						return Pair.of(train, start.add(normedDiff.scale(intersect[0])));
-					}
-				}
 			}
+
 		}
 		return null;
 	}
