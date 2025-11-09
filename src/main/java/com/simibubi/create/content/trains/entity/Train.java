@@ -411,7 +411,6 @@ public class Train {
 
 			if (index == 0) {
 				distance = actualDistance;
-				updateCollisionCache();
 				collideWithOtherTrains(level, carriage);
 				backwardsDriver = null;
 				if (graph == null)
@@ -600,17 +599,17 @@ public class Train {
 	}
 
 
-	private void updateCollisionCache() {
+	public void updateCollisionCache() {
 		if (derailed || graph == null) {
 			if (collisionCache != null)
-				collisionCache.invalidate();
+				collisionCache = null;
 			return;
 		}
 
-		int totalSegments = carriages.size() * 2 - 1;
+		int maxExpectedSegments = carriages.size() * 2 - 1;
 
-		if (collisionCache == null || collisionCache.start.length < totalSegments) {
-			collisionCache = new CollisionCache(totalSegments);
+		if (collisionCache == null || collisionCache.start.length < maxExpectedSegments) {
+			collisionCache = new CollisionCache(maxExpectedSegments);
 		}
 
 		Vec3 lastPoint = null;
@@ -639,11 +638,11 @@ public class Train {
 			Vec3 start = leading.getPosition(graph);
 			Vec3 end = trailing.getPosition(graph);
 
-			if (lastPoint != null && segmentIndex < totalSegments) {
+			if (lastPoint != null && segmentIndex < maxExpectedSegments) {
 				collisionCache.addSegment(lastPoint, start, segmentIndex++);
 			}
 
-			if (segmentIndex < totalSegments) {
+			if (segmentIndex < maxExpectedSegments) {
 				collisionCache.addSegment(start, end, segmentIndex++);
 			}
 
@@ -652,7 +651,9 @@ public class Train {
 
 		collisionCache.segmentCount = segmentIndex;
 		collisionCache.dimension = trainDimension;
-		collisionCache.valid = segmentIndex > 0 && trainDimension != null;
+		if(segmentIndex == 0) {
+			collisionCache=null;
+		}
 	}
 
 	private void collideWithOtherTrains(Level level, Carriage carriage) {
@@ -668,10 +669,10 @@ public class Train {
 		if (!dimension.equals(trailingPoint.node1.getLocation().dimension))
 			return;
 
-		Vec3 start = (speed < 0 ? trailingPoint : leadingPoint).getPosition(graph);
-		Vec3 end = (speed < 0 ? leadingPoint : trailingPoint).getPosition(graph);
+		Vec3 start = collisionCache.start[0];
+		Vec3 end = collisionCache.end[collisionCache.segmentCount - 1];
 
-		Pair<Train, Vec3> collision = findCollidingTrain(level, start, end, dimension);
+		Pair<Train, Vec3> collision = findCollidingTrain(level,start,end, dimension);
 		if (collision == null)
 			return;
 
@@ -691,11 +692,8 @@ public class Train {
 		Vec3 diff = end.subtract(start);
 		double length = diff.length();
 
-		if (length < 0.0001)
-			return null;
-
 		Vec3 normedDiff = diff.normalize();
-		double maxDistanceSqr = Math.pow(AllConfigs.server().trains.maxAssemblyLength.get(), 2.0);
+		double maxDistanceSqr = AllConfigs.server().trains.maxAssemblyLength.get()*AllConfigs.server().trains.maxAssemblyLength.get();
 
 		Trains: for (Train train : Create.RAILWAYS.sided(level).trains.values()) {
 			if (train == this)
@@ -703,13 +701,7 @@ public class Train {
 			if (train.graph != null && train.graph != graph)
 				continue;
 
-			// Compute cache for trains that don't have it yet
-			if (train.collisionCache == null || !train.collisionCache.isValid()) {
-				train.updateCollisionCache();
-			}
-
-			// Use cached data if available, otherwise fall back to old method
-			if (train.collisionCache != null && train.collisionCache.isValid()) {
+			if (train.collisionCache != null ) {
 				if (!train.collisionCache.dimension.equals(dimension))
 					continue;
 
@@ -725,7 +717,7 @@ public class Train {
 
 					// Vertical separation check
 					if ((end.y < end2.y - 3 || end2.y < end.y - 3)
-					    && (start.y < start2.y - 3 || start2.y < start.y - 3))
+						&& (start.y < start2.y - 3 || start2.y < start.y - 3))
 						continue;
 
 					// Use precomputed direction vectors from cache
@@ -1139,7 +1131,6 @@ public class Train {
 
 		// Metadata
 		ResourceKey<Level> dimension;
-		boolean valid;
 
 		CollisionCache(int maxSegments) {
 			this.segmentCount = 0;
@@ -1147,24 +1138,13 @@ public class Train {
 			this.end = new Vec3[maxSegments];
 			this.direction = new Vec3[maxSegments];
 			this.segmentLength = new double[maxSegments];
-			this.valid = false;
 		}
 
-		void invalidate() {
-			this.valid = false;
-		}
-
-		boolean isValid() {
-			return valid && segmentCount > 0;
-		}
 
 		/**
 		 * Add a segment to the cache with precomputed direction and length
 		 */
 		void addSegment(Vec3 startPos, Vec3 endPos, int index) {
-			if (index >= start.length)
-				return;
-
 			start[index] = startPos;
 			end[index] = endPos;
 
@@ -1173,11 +1153,8 @@ public class Train {
 			double length = diff.length();
 
 			segmentLength[index] = length;
-			if (length > 0.0001) {
-				direction[index] = diff.normalize();
-			} else {
-				direction[index] = Vec3.ZERO;
-			}
+			direction[index] = diff.normalize();
+
 		}
 	}
 
