@@ -600,10 +600,10 @@ public class Train {
 
 
 	public void updateCollisionCache() {
+		//
 		if (derailed || graph == null) {
 			if (collisionCache != null)
-				collisionCache = null;
-			return;
+				return;
 		}
 
 		int maxExpectedSegments = carriages.size() * 2 - 1;
@@ -612,6 +612,7 @@ public class Train {
 			collisionCache = new CollisionCache(maxExpectedSegments);
 		}
 
+		//For adding segments between carriages
 		Vec3 lastPoint = null;
 		int segmentIndex = 0;
 		ResourceKey<Level> trainDimension = null;
@@ -638,21 +639,20 @@ public class Train {
 			Vec3 start = leading.getPosition(graph);
 			Vec3 end = trailing.getPosition(graph);
 
-			if (lastPoint != null && segmentIndex < maxExpectedSegments) {
+			if (lastPoint != null) {
 				collisionCache.addSegment(lastPoint, start, segmentIndex++);
 			}
 
-			if (segmentIndex < maxExpectedSegments) {
-				collisionCache.addSegment(start, end, segmentIndex++);
-			}
+			collisionCache.addSegment(start, end, segmentIndex++);
+
 
 			lastPoint = end;
 		}
 
 		collisionCache.segmentCount = segmentIndex;
 		collisionCache.dimension = trainDimension;
-		if(segmentIndex == 0) {
-			collisionCache=null;
+		if (segmentIndex == 0) {
+			collisionCache = null;
 		}
 	}
 
@@ -669,6 +669,9 @@ public class Train {
 		if (!dimension.equals(trailingPoint.node1.getLocation().dimension))
 			return;
 
+		if (collisionCache == null) {
+			updateCollisionCache();
+		}
 		Vec3 start = collisionCache.start[0];
 		Vec3 end = collisionCache.end[collisionCache.segmentCount - 1];
 
@@ -693,50 +696,50 @@ public class Train {
 		double length = diff.length();
 
 		Vec3 normedDiff = diff.normalize();
-		double maxDistanceSqr = AllConfigs.server().trains.maxAssemblyLength.get()*AllConfigs.server().trains.maxAssemblyLength.get();
+		double maxDistance = AllConfigs.server().trains.maxAssemblyLength.get();
+		double maxDistanceSqr = maxDistance * maxDistance;
 
 		Trains: for (Train train : Create.RAILWAYS.sided(level).trains.values()) {
 			if (train == this)
 				continue;
 			if (train.graph != null && train.graph != graph)
 				continue;
+			if (train.collisionCache == null) {continue;}
+			if (!train.collisionCache.dimension.equals(dimension))
+				continue;
 
-			if (train.collisionCache != null ) {
-				if (!train.collisionCache.dimension.equals(dimension))
+			// Fast path: iterate through precomputed cache
+			CollisionCache cache = train.collisionCache;
+			for (int i = 0; i < cache.segmentCount; i++) {
+				Vec3 start2 = cache.start[i];
+				Vec3 end2 = cache.end[i];
+
+				// Early distance culling using cached positions
+				if (Math.min(start2.distanceToSqr(start), end2.distanceToSqr(start)) > maxDistanceSqr)
+					continue Trains;
+
+				// Vertical separation check
+				if ((end.y < end2.y - 3 || end2.y < end.y - 3)
+					&& (start.y < start2.y - 3 || start2.y < start.y - 3))
 					continue;
 
-				// Fast path: iterate through precomputed cache
-				CollisionCache cache = train.collisionCache;
-				for (int i = 0; i < cache.segmentCount; i++) {
-					Vec3 start2 = cache.start[i];
-					Vec3 end2 = cache.end[i];
+				// Use precomputed direction vectors from cache
+				Vec3 normedDiff2 = cache.direction[i];
+				double[] intersect = VecHelper.intersect(start, start2, normedDiff, normedDiff2, Axis.Y);
 
-					// Early distance culling using cached positions
-					if (Math.min(start2.distanceToSqr(start), end2.distanceToSqr(start)) > maxDistanceSqr)
-						continue Trains;
-
-					// Vertical separation check
-					if ((end.y < end2.y - 3 || end2.y < end.y - 3)
-						&& (start.y < start2.y - 3 || start2.y < start.y - 3))
+				if (intersect == null) {
+					// Sphere intersection fallback
+					Vec3 intersectSphere = VecHelper.intersectSphere(start2, normedDiff2, start, .125f);
+					if (intersectSphere == null)
 						continue;
 
-					// Use precomputed direction vectors from cache
-					Vec3 normedDiff2 = cache.direction[i];
-					double[] intersect = VecHelper.intersect(start, start2, normedDiff, normedDiff2, Axis.Y);
+					if (!Mth.equal(normedDiff2.dot(intersectSphere.subtract(start2).normalize()), 1))
+						continue;
 
-					if (intersect == null) {
-						// Sphere intersection fallback
-						Vec3 intersectSphere = VecHelper.intersectSphere(start2, normedDiff2, start, .125f);
-						if (intersectSphere == null)
-							continue;
+					intersect = new double[2];
+					intersect[0] = intersectSphere.distanceTo(start) - .125;
+					intersect[1] = intersectSphere.distanceTo(start2) - .125;
 
-						if (!Mth.equal(normedDiff2.dot(intersectSphere.subtract(start2).normalize()), 1))
-							continue;
-
-						intersect = new double[2];
-						intersect[0] = intersectSphere.distanceTo(start) - .125;
-						intersect[1] = intersectSphere.distanceTo(start2) - .125;
-					}
 
 					// Bounds checking using cached lengths
 					if (intersect[0] > length || intersect[0] < 0)
